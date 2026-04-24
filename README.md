@@ -16,7 +16,7 @@
 
 [**Releases**](https://github.com/x7780/immortalwrt-Actios/releases) → 找到你编译的对应版本 → 下载你编译的版本（OpenWrt_xxx_xxx_刷机包.zip 解压即刷）
 
-> ⚠️ 注意：插件建议不超过 20 个，随身wifi设备只有512MB内存，太多会设备内存负担太大，请勿重复添加
+> ⚠️ 注意：插件建议不超过 30 个，随身wifi设备只有512MB内存，太多会设备内存负担太大，请勿重复添加
 
 ![编译教程](img/1.png)
 ---
