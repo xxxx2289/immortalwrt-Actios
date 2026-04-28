@@ -1,32 +1,31 @@
 #!/bin/bash
-# DIY脚本
-# https://github.com/P3TERX/Actions-OpenWrt
-# 文件名: diy-part2.sh
-# 功能说明: OpenWrt DIY脚本第2部分（更新feeds之后）
-# 版权: (c) 2019-2024 P3TERX <https://p3terx.com>
-# 基于 MIT 开源协议，详见 /LICENSE
+#
 
-# 修改默认IP地址
-#sed -i 's/192.168.1.1/192.168.100.1/g' package/base-files/files/bin/config_generate
+# Modify default IP
+# sed -i 's/192.168.1.1/192.168.100.1/g' package/base-files/files/bin/config_generate
 
-
-# 修改默认主题为 argon
+# Modify default theme
 sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
 
-
-# 临时添加的插件
-# git clone https://github.com/lkiuyu/luci-app-cpu-perf package/luci-app-cpu-perf
-# git clone https://github.com/lkiuyu/luci-app-cpu-status package/luci-app-cpu-status
-# git clone https://github.com/gSpotx2f/luci-app-cpu-status-mini package/luci-app-cpu-status-mini
-# git clone https://github.com/lkiuyu/luci-app-temp-status package/luci-app-temp-status
-# git clone https://github.com/lkiuyu/DbusSmsForwardCPlus package/DbusSmsForwardCPlus
-
-# Fix libmbim dependency
-if [ -f feeds/packages/libs/libmbim/Makefile ]; then
-  sed -i '/define Package\/libmbim/,/endef/s/DEPENDS:=.*/DEPENDS:=+glib2/' feeds/packages/libs/libmbim/Makefile
+# Fix glib2 meta package dependency typo if present
+if [ -f feeds/packages/libs/glib2/Makefile ]; then
+  sed -i 's/^DEPENDS:+glib2-gthread/DEPENDS:=+glib2-gthread/' feeds/packages/libs/glib2/Makefile
 fi
 
-# Make sure glib2 is selected
-sed -i '/^CONFIG_PACKAGE_glib2=/d' .config
-sed -i '/^# CONFIG_PACKAGE_glib2 is not set/d' .config
-echo 'CONFIG_PACKAGE_glib2=y' >> .config
+# Fix libmbim dependency for split glib2 packages
+if [ -f feeds/packages/libs/libmbim/Makefile ]; then
+  sed -i '/define Package\/libmbim/,/endef/s/^[[:space:]]*DEPENDS:=.*/DEPENDS:=+glib2-core +glib2-gobject +glib2-gio/' feeds/packages/libs/libmbim/Makefile
+fi
+
+# Make sure required packages are selected
+for p in glib2-core glib2-gmodule glib2-gobject glib2-gio glib2-gthread libmbim; do
+  sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
+  sed -i "/^# CONFIG_PACKAGE_${p} is not set/d" .config
+  echo "CONFIG_PACKAGE_${p}=y" >> .config
+done
+
+# Show patched dependency for debugging
+echo "===== libmbim dependency after patch ====="
+grep -A8 -n "define Package/libmbim" feeds/packages/libs/libmbim/Makefile || true
+echo "===== glib2 package config after patch ====="
+grep -E "CONFIG_PACKAGE_(glib2|glib2-core|glib2-gobject|glib2-gio|glib2-gthread|libmbim)" .config || true
