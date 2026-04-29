@@ -56,18 +56,26 @@ jobs:
           > .config
         make defconfig
 
+    - name: Build host tools & toolchain
+      run: |
+        cd openwrt
+        echo "===== 编译 host tools ====="
+        make tools/install -j$(nproc) V=s
+        echo "===== 编译 toolchain ====="
+        make toolchain/install -j$(nproc) V=s
+
     - name: Compile glib2
       run: |
         cd openwrt
         echo "===== 开始编译 glib2 ====="
-        make package/feeds/packages/glib2/compile V=s -j1 2>&1 | tee /tmp/glib2_build.log
+        make package/feeds/packages/glib2/compile V=s -j$(nproc) 2>&1 | tee /tmp/glib2_build.log
         echo "===== glib2 编译结束 ====="
 
     - name: Compile libmbim
       run: |
         cd openwrt
         echo "===== 开始编译 libmbim ====="
-        make package/feeds/packages/libmbim/compile V=s -j1 2>&1 | tee /tmp/libmbim_build.log
+        make package/feeds/packages/libmbim/compile V=s -j$(nproc) 2>&1 | tee /tmp/libmbim_build.log
         echo "===== libmbim 编译结束 ====="
 
     - name: Upload build logs
