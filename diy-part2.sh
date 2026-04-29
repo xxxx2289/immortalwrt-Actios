@@ -1,5 +1,7 @@
 #!/bin/bash
+
 set -e
+
 echo "===== DIY PART2: remove MSM8916 baseband/modem packages for all 410 WiFi devices ====="
 
 sed -i 's/luci-theme-material/luci-theme-argon/g' feeds/luci/collections/luci/Makefile 2>/dev/null || true
