@@ -1,4 +1,4 @@
-name: 🔒 Sync_upstream_lock
+name: 🔒 每7天验证上流是否可以编译
 
 on:
   schedule:
