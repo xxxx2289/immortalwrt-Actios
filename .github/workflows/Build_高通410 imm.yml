@@ -1,7 +1,7 @@
 #
 #
 
-name: Build_imm_高通410系列
+name: 🚀 Build_imm_高通410系列
 
 on:
   repository_dispatch:
@@ -36,9 +36,13 @@ on:
         type: choice
         options:
           - lkiuyu/immortalwrt
-          - xuxin1955/immortalwrt
         default: lkiuyu/immortalwrt
         required: true
+      custom_hash:
+        description: ' ↓ 指定 hash（默认不用填写）↓ '
+        required: false
+        default: ''
+        type: string
       extra_packages:
         description: ' ↓ 输入额外包名（逗号或空格分隔，留空则不添加任何额外包）↓ '
         required: false
@@ -64,7 +68,7 @@ jobs:
       contents: write
       actions: write
     steps:
-    - name: Checkout
+    - name: 🚀 编译 (Build)
       uses: actions/checkout@main
 
     - name: Show hardware info
@@ -122,11 +126,31 @@ jobs:
 
 
 
+    - name: 读取锁定的上游 hash (Read locked upstream hash)
+      id: lock
+      run: |
+        CUSTOM_HASH="${{ github.event.inputs.custom_hash }}"
+        LOCK_FILE="upstream_lock.txt"
+        if [ -n "$CUSTOM_HASH" ]; then
+          echo "locked_hash=$CUSTOM_HASH" >> $GITHUB_OUTPUT
+          echo "使用用户指定 hash: $CUSTOM_HASH"
+        elif [ -f "$LOCK_FILE" ]; then
+          HASH=$(cat $LOCK_FILE)
+          echo "locked_hash=$HASH" >> $GITHUB_OUTPUT
+          echo "使用锁定 hash: $HASH"
+        else
+          echo "locked_hash=" >> $GITHUB_OUTPUT
+          echo "upstream_lock.txt 不存在，使用最新 master"
+        fi
+
     - name: Clone source code
       working-directory: /mnt
       run: |
         df -hT $PWD
         git clone $REPO_URL -b $REPO_BRANCH openwrt
+        if [ -n "${{ steps.lock.outputs.locked_hash }}" ]; then
+          cd openwrt && git checkout ${{ steps.lock.outputs.locked_hash }}
+        fi
         ln -sf /mnt/openwrt $GITHUB_WORKSPACE/openwrt
 
 
