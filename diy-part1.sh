@@ -1,26 +1,24 @@
 #!/bin/bash
-# DIY脚本
-# https://github.com/P3TERX/Actions-OpenWrt
-# 文件名: diy-part1.sh
-# 功能说明: OpenWrt DIY脚本第1部分（更新feeds之前）
-# 版权: (c) 2019-2024 P3TERX <https://p3terx.com>
-# 基于 MIT 开源协议，详见 /LICENSE
+set -e
 
-# 取消注释一个源
-# sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
+echo "===== DIY PART1: feeds + no-modem DTS patch ====="
 
-# 添加第三方 feed 源（small-package 包含 openclash/passwall/ssr-plus 等常用插件）
+# 如果你需要 small-package，再打开这一行
 # echo 'src-git smpackage https://github.com/kenzok8/small-package' >> feeds.conf.default
 
+# 如果上游 feeds 需要替换，可以保留这一行
+sed -i 's|src-git-full openstick https://github.com/lkiuyu/openstick-feeds.git|src-git-full openstick https://github.com/xuxin1955/openstick-feeds|g' feeds.conf.default 2>/dev/null || true
 
-# OpenClash代理
-# git clone --depth 1 https://github.com/vernesong/OpenClash.git OpenClash
+# 真正释放 modem/MPSS 预留内存的关键：替换 msm8916.dtsi
+if [ -f "$GITHUB_WORKSPACE/scripts/dts/msm8916.dtsi" ]; then
+    echo "Copy no-modem msm8916.dtsi into target/linux/msm89xx/dts/"
+    mkdir -p target/linux/msm89xx/dts
+    cp -f "$GITHUB_WORKSPACE/scripts/dts/msm8916.dtsi" target/linux/msm89xx/dts/msm8916.dtsi
+else
+    echo "ERROR: $GITHUB_WORKSPACE/scripts/dts/msm8916.dtsi not found"
+    exit 1
+fi
 
-# turboacc网络加速
-# curl -sSL https://raw.githubusercontent.com/mufeng05/turboacc/main/add_turboacc.sh -o add_turboacc.sh && bash add_turboacc.sh
-
-# 调试
-# sed -i 's|src-git-full openstick https://github.com/lkiuyu/openstick-feeds.git|src-git-full openstick https://github.com/xuxin1955/openstick-feeds|g' feeds.conf.default
-
-
+echo "===== Check modem reserved memory in DTS ====="
+grep -nA12 -B4 'mpss_mem: mpss@86800000' target/linux/msm89xx/dts/msm8916.dtsi || true
 
