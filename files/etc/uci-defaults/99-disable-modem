@@ -1,1 +1,42 @@
+#!/bin/sh
+# Disable modem/baseband services and module autoload at first boot.
+# Keep WCNSS/Wi-Fi modules untouched.
 
+for svc in modemmanager qmi-modem-410-init rmtfs; do
+  if [ -x "/etc/init.d/$svc" ]; then
+    /etc/init.d/$svc stop 2>/dev/null || true
+    /etc/init.d/$svc disable 2>/dev/null || true
+  fi
+done
+
+mkdir -p /etc/modules.d.disabled
+
+for f in \
+  bam-dmux \
+  rpmsg-wwan-ctrl \
+  qcom-rproc-modem \
+  qcom_q6v5_mss \
+  qmi_wwan \
+  cdc_mbim \
+  cdc_ncm \
+  huawei_cdc_ncm \
+  option \
+  usb_wwan \
+  usb-wdm
+do
+  [ -e "/etc/modules.d/$f" ] && mv "/etc/modules.d/$f" "/etc/modules.d.disabled/$f" 2>/dev/null || true
+done
+
+for m in \
+  qmi_wwan \
+  cdc_mbim \
+  option \
+  usb_wwan \
+  rpmsg_wwan_ctrl \
+  bam_dmux \
+  qcom_q6v5_mss
+do
+  rmmod "$m" 2>/dev/null || true
+done
+
+exit 0
