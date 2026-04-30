@@ -38,13 +38,13 @@ on:
           - lkiuyu/immortalwrt
         default: lkiuyu/immortalwrt
         required: true
-      extra_packages:
-        description: ' ↓ 输入额外包名（逗号或空格分隔，留空则不添加任何额外包）↓ '
+      custom_hash:
+        description: ' ↓ 指定上游 commit hash（留空则自动使用 upstream_lock.txt 中已验证的稳定版本；如固件有问题可从 upstream_history.txt 查历史填入旧 hash 回滚）↓ '
         required: false
         default: ''
         type: string
-      custom_hash:
-        description: ' ↓ 指定上游 commit hash（留空则自动使用 upstream_lock.txt 中已验证的稳定版本；如固件有问题可从 upstream_history.txt 查历史填入旧 hash 回滚）↓ '
+      extra_packages:
+        description: ' ↓ 输入额外包名（逗号或空格分隔，留空则不添加任何额外包）↓ '
         required: false
         default: ''
         type: string
