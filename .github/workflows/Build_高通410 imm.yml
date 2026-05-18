@@ -196,8 +196,20 @@ jobs:
         PACKAGES=$(echo '${{ inputs.extra_packages }}' | sed 's/,/ /g')
         for pkg in $PACKAGES; do
           if [ -n "$pkg" ]; then
-            echo "Adding package to .config: CONFIG_PACKAGE_$pkg=y"
-            echo "CONFIG_PACKAGE_$pkg=y" >> .config
+            CFG="CONFIG_PACKAGE_${pkg}"
+            # 优先原地替换 "is not set" 为 "=y"（最干净，make defconfig 无歧义）
+            if grep -q "^# ${CFG} is not set" .config; then
+              sed -i "s/^# ${CFG} is not set$/${CFG}=y/" .config
+              echo "✅ Enabled (replaced): ${CFG}=y"
+            elif grep -q "^${CFG}=" .config; then
+              # 已存在但可能是 =m 或 =n，直接改为 =y
+              sed -i "s/^${CFG}=.*$/${CFG}=y/" .config
+              echo "✅ Enabled (updated): ${CFG}=y"
+            else
+              # config 里完全没提到这个包，追加到末尾
+              echo "${CFG}=y" >> .config
+              echo "✅ Enabled (appended): ${CFG}=y"
+            fi
           fi
         done
         
