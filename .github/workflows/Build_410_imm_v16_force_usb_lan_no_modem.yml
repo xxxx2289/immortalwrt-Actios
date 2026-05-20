@@ -1,0 +1,927 @@
+name: Build_imm_高通410系列
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: '是否开启 SSH 调试'
+        required: false
+        default: false
+        type: boolean
+      profile:
+        description: '选择要编译的机型'
+        type: choice
+        options:
+          - ufi003
+          - ufi001c
+          - ufi001b
+          - ufi103s
+          - jz02v10
+          - qrzl903
+          - w001
+          - uz801
+          - mf32
+          - mf601
+          - wf2
+          - sp970v11
+          - sp970v10
+        default: ufi003
+        required: true
+      upstream:
+        description: '选择上游源码仓库'
+        type: choice
+        options:
+          - lkiuyu/immortalwrt
+        default: lkiuyu/immortalwrt
+        required: true
+      modem:
+        description: 'Modem 版本选择'
+        type: choice
+        options:
+          - 保留modem
+          - 仅去除用户态modem
+          - 去除内核基带modem
+        default: 保留modem
+        required: true
+      custom_hash:
+        description: '指定 hash，默认不用填写'
+        required: false
+        default: ''
+        type: string
+      extra_packages:
+        description: '输入额外包名，逗号或空格分隔，留空则不添加'
+        required: false
+        default: ''
+        type: string
+
+env:
+  REPO_URL: https://github.com/${{ github.event.inputs.upstream || 'lkiuyu/immortalwrt' }}
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: ${{ format('config/{0}.config', github.event.inputs.profile || 'ufi003') }}
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Show hardware info
+        run: |
+          if [ -f ./scripts/show_hardware_info.sh ]; then
+            chmod 755 ./scripts/show_hardware_info.sh
+            ./scripts/show_hardware_info.sh
+          else
+            echo "scripts/show_hardware_info.sh not found, skip"
+          fi
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: false
+          dotnet: false
+          haskell: false
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+
+      - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -y update
+          sudo -E apt-get -y install $(curl -fsSL https://raw.githubusercontent.com/xuxin1955/depend_ubuntu2204_openwrt/refs/heads/main/depend_ubuntu2204_openwrt)
+          sudo -E apt-get -y install zip unzip dos2unix python3 python3-pip jq curl wget file gzip ca-certificates
+          sudo timedatectl set-timezone "$TZ"
+          sudo chmod 777 /mnt
+          df -hT
+
+      - name: mkbootimg build
+        run: |
+          wget -q https://github.com/xuxin1955/depend_ubuntu2204_openwrt/releases/download/ubuntu_26.04_LTS_mkbootimg/mkbootimg_34.0.5-12build1_all.deb
+          sudo dpkg -i mkbootimg_34.0.5-12build1_all.deb || sudo apt-get install -f -y
+          mkbootimg --help >/dev/null 2>&1 || true
+          MKBOOTIMG_PATH=$(which mkbootimg || true)
+          echo "mkbootimg: ${MKBOOTIMG_PATH:-not found}"
+
+      - name: Ensure Python build tools
+        run: |
+          python3 -m pip cache purge || true
+          python3 -m pip install --upgrade --force-reinstall pip
+          python3 -m pip install --upgrade --force-reinstall 'setuptools>=65' wheel
+          python3 -m pip install --upgrade 'setuptools-scm>=8,<10' cython packaging tomli Unidecode pyelftools
+          python3 -c "import setuptools.build_meta; print('setuptools.build_meta OK')"
+
+      - name: Read locked upstream hash
+        id: lock
+        run: |
+          CUSTOM_HASH="${{ github.event.inputs.custom_hash }}"
+          LOCK_FILE="upstream_lock.txt"
+          if [ -n "$CUSTOM_HASH" ]; then
+            echo "locked_hash=$CUSTOM_HASH" >> "$GITHUB_OUTPUT"
+            echo "使用用户指定 hash: $CUSTOM_HASH"
+          elif [ -f "$LOCK_FILE" ]; then
+            HASH=$(cat "$LOCK_FILE")
+            echo "locked_hash=$HASH" >> "$GITHUB_OUTPUT"
+            echo "使用锁定 hash: $HASH"
+          else
+            echo "locked_hash=" >> "$GITHUB_OUTPUT"
+            echo "upstream_lock.txt 不存在，使用最新 master"
+          fi
+
+      - name: Clone source code
+        working-directory: /mnt
+        run: |
+          df -hT "$PWD"
+          git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
+          if [ -n "${{ steps.lock.outputs.locked_hash }}" ]; then
+            cd openwrt
+            git checkout "${{ steps.lock.outputs.locked_hash }}"
+          fi
+          ln -sf /mnt/openwrt "$GITHUB_WORKSPACE/openwrt"
+
+      - name: Copy custom files
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            mkdir -p openwrt/files
+            cp -a "$GITHUB_WORKSPACE/files/." openwrt/files/
+          fi
+
+      - name: Load custom feeds
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/$FEEDS_CONF" ]; then
+            cp -f "$GITHUB_WORKSPACE/$FEEDS_CONF" openwrt/feeds.conf.default
+          fi
+          if [ -f "$GITHUB_WORKSPACE/$DIY_P1_SH" ]; then
+            chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
+            cd openwrt
+            "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          fi
+
+      - name: Update feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+
+      - name: Remove conflicting packages from smpackage
+        run: |
+          rm -rf openwrt/feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb} 2>/dev/null || true
+
+      - name: Install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds install -a -f
+
+      - name: Load custom configuration
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
+            cp -f "$GITHUB_WORKSPACE/$CONFIG_FILE" openwrt/.config
+          else
+            echo "::error::Config file not found: $CONFIG_FILE"
+            exit 1
+          fi
+          if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
+            chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+            cd openwrt
+            "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          fi
+
+      - name: Inject USB LAN sharing and modem profile
+        run: |
+          cd openwrt
+          MODEM_CHOICE="${{ github.event.inputs.modem || '保留modem' }}"
+
+          echo "===== 强制内置 USB 共享 LAN ====="
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/zzzz-force-usb-lan <<'EOF'
+          #!/bin/sh
+          # 强制开启 USB 共享 LAN：usb0 -> br-lan -> 192.168.1.1 + DHCP
+          set +e
+
+          for s in usb-gadget usbgadget gadget rndis android-gadget usbmode; do
+            if [ -x "/etc/init.d/$s" ]; then
+              /etc/init.d/$s enable 2>/dev/null || true
+              /etc/init.d/$s start 2>/dev/null || true
+            fi
+          done
+
+          BRDEV=""
+          for s in $(uci show network 2>/dev/null | sed -n "s/^\(network\.[^=]*\)=device$/\1/p"); do
+            NAME="$(uci -q get ${s}.name)"
+            if [ "$NAME" = "br-lan" ]; then
+              BRDEV="$s"
+              break
+            fi
+          done
+
+          if [ -z "$BRDEV" ]; then
+            BRDEV="network.br_lan"
+            uci -q delete network.br_lan
+            uci set network.br_lan='device'
+            uci set network.br_lan.name='br-lan'
+          fi
+
+          uci set ${BRDEV}.type='bridge'
+          uci del_list ${BRDEV}.ports='usb0' 2>/dev/null || true
+          uci add_list ${BRDEV}.ports='usb0'
+
+          uci set network.lan='interface'
+          uci set network.lan.device='br-lan'
+          uci set network.lan.proto='static'
+          uci set network.lan.ipaddr='192.168.1.1'
+          uci set network.lan.netmask='255.255.255.0'
+          uci set network.lan.ip6assign='60'
+
+          uci set dhcp.lan='dhcp'
+          uci set dhcp.lan.interface='lan'
+          uci set dhcp.lan.start='100'
+          uci set dhcp.lan.limit='150'
+          uci set dhcp.lan.leasetime='12h'
+          uci set dhcp.lan.force='1'
+          uci -q delete dhcp.lan.ignore
+
+          LAN_ZONE=""
+          for z in $(uci show firewall 2>/dev/null | sed -n "s/^\(firewall\.[^=]*\)=zone$/\1/p"); do
+            NAME="$(uci -q get ${z}.name)"
+            if [ "$NAME" = "lan" ]; then
+              LAN_ZONE="$z"
+              break
+            fi
+          done
+
+          if [ -n "$LAN_ZONE" ]; then
+            uci del_list ${LAN_ZONE}.network='lan' 2>/dev/null || true
+            uci add_list ${LAN_ZONE}.network='lan'
+          fi
+
+          uci commit network
+          uci commit dhcp
+          uci commit firewall 2>/dev/null || true
+          exit 0
+          EOF
+          sed -i 's/^          //' files/etc/uci-defaults/zzzz-force-usb-lan
+          chmod +x files/etc/uci-defaults/zzzz-force-usb-lan
+
+          # 尽量确保 USB Ethernet gadget 相关包被选中，避免只有串口/ADB 没有 usb0。
+          for cfg in \
+            CONFIG_PACKAGE_libusbgx \
+            CONFIG_PACKAGE_kmod-usb-gadget-eth \
+            CONFIG_PACKAGE_kmod-usb-gadget-serial \
+            CONFIG_PACKAGE_kmod-usb-dwc3 \
+            CONFIG_PACKAGE_kmod-usb-dwc3-msm \
+            CONFIG_PACKAGE_android-tools-adbd
+          do
+            sed -i "/^# ${cfg} is not set/d;/^${cfg}=/d" .config
+            echo "${cfg}=y" >> .config
+          done
+
+          echo "===== Modem choice: $MODEM_CHOICE ====="
+          case "$MODEM_CHOICE" in
+            "保留modem")
+              echo "MODEM_ID=_with_modem" >> "$GITHUB_ENV"
+              ;;
+            "仅去除用户态modem"|"去除内核基带modem")
+              if [ "$MODEM_CHOICE" = "仅去除用户态modem" ]; then
+                echo "MODEM_ID=_no_modem_userspace" >> "$GITHUB_ENV"
+              else
+                echo "MODEM_ID=_no_modem_kernel" >> "$GITHUB_ENV"
+              fi
+
+              mkdir -p files/etc/uci-defaults files/etc/modules.d.disabled
+              cat > files/etc/uci-defaults/zzzz-no-modem-cleanup <<'EOF'
+              #!/bin/sh
+              # 清理 410 棒子基带用户态、网络接口和自启动残留；不动 Wi-Fi 的 wcnss。
+              set +e
+
+              for s in modemmanager ModemManager qmi_auto_activate qmi-auto-activate qmi-modem-410-init rmtfs qrtr qrtr-ns; do
+                if [ -x "/etc/init.d/$s" ]; then
+                  /etc/init.d/$s stop 2>/dev/null || true
+                  /etc/init.d/$s disable 2>/dev/null || true
+                fi
+              done
+
+              for p in ModemManager ModemManager-wrapper ModemManager-monitor qmi_auto_activate qmi-proxy qmi-modem-410-init rmtfs qrtr-ns; do
+                killall "$p" 2>/dev/null || true
+              done
+
+              uci -q delete network.modem
+              uci -q delete network.qmi
+              uci -q delete network.mobile
+              uci -q delete network.wwan_4g
+              uci -q del_list firewall.@zone[1].network='modem'
+              uci -q del_list firewall.@zone[1].network='qmi'
+              uci -q del_list firewall.@zone[1].network='mobile'
+              uci commit network
+              uci commit firewall 2>/dev/null || true
+
+              for f in \
+                /etc/modules.d/*qcom*q6v5*mss* \
+                /etc/modules.d/*rpmsg*wwan* \
+                /etc/modules.d/*wwan* \
+                /etc/modules.d/*qmi* \
+                /etc/modules.d/*mbim* \
+                /etc/modules.d/*option*
+              do
+                [ -e "$f" ] || continue
+                mkdir -p /etc/modules.d.disabled
+                mv "$f" /etc/modules.d.disabled/ 2>/dev/null || true
+              done
+
+              for m in rpmsg_wwan_ctrl option usb_wwan wwan qcom_q6v5_mss; do
+                rmmod "$m" 2>/dev/null || true
+              done
+
+              exit 0
+              EOF
+              sed -i 's/^              //' files/etc/uci-defaults/zzzz-no-modem-cleanup
+              chmod +x files/etc/uci-defaults/zzzz-no-modem-cleanup
+
+              # 去掉 openstick-tweaks 对基带用户态的强依赖，避免 defconfig 又把 ModemManager/QMI 拉回来。
+              for mf in feeds/openstick/utils/openstick-tweaks/Makefile package/feeds/openstick/openstick-tweaks/Makefile; do
+                [ -f "$mf" ] || continue
+                sed -i \
+                  -e 's/+qmi-modem-410-init//g' \
+                  -e 's/+luci-proto-modemmanager//g' \
+                  -e 's/+modemmanager//g' \
+                  -e 's/+rmtfs//g' \
+                  -e 's/+qrtr-ns//g' \
+                  "$mf"
+              done
+
+              for pkg in \
+                modemmanager luci-proto-modemmanager qmi-modem-410-init qmi-utils libqmi libqrtr-glib libqrtr qrtr-ns rmtfs \
+                kmod-rpmsg-wwan-ctrl kmod-qcom-rproc-modem kmod-usb-serial-option kmod-usb-serial-wwan
+              do
+                cfg="CONFIG_PACKAGE_${pkg}"
+                sed -i "/^${cfg}=/d;/^# ${cfg} is not set/d" .config
+                echo "# ${cfg} is not set" >> .config
+              done
+              ;;
+            *)
+              echo "::error::Unknown modem choice: $MODEM_CHOICE"
+              exit 1
+              ;;
+          esac
+
+      - name: Install extra packages
+        if: ${{ github.event.inputs.extra_packages != '' }}
+        run: |
+          cd openwrt
+          echo "=========================================="
+          echo "User requested extra packages:"
+          echo "${{ github.event.inputs.extra_packages }}"
+          echo "=========================================="
+          PACKAGES=$(echo '${{ github.event.inputs.extra_packages }}' | sed 's/,/ /g')
+          for pkg in $PACKAGES; do
+            [ -n "$pkg" ] || continue
+            CFG="CONFIG_PACKAGE_${pkg}"
+            sed -i "/^# ${CFG} is not set/d;/^${CFG}=/d" .config
+            echo "${CFG}=y" >> .config
+            echo "Enabled: ${CFG}=y"
+          done
+
+      - name: SSH debug
+        uses: mxschmitt/action-tmate@master
+        if: ${{ github.event.inputs.ssh || contains(github.event.action, 'ssh') }}
+
+      - name: Config defconfig
+        id: config
+        run: |
+          cd openwrt
+          make defconfig
+          echo "===== selected usb/modem config ====="
+          grep -E 'CONFIG_PACKAGE_(libusbgx|kmod-usb-gadget|android-tools-adbd|modemmanager|qmi|rmtfs|qrtr|rpmsg|qcom-rproc)' .config || true
+
+      - name: Prepare kernel for no-modem DTS patch
+        if: ${{ github.event.inputs.modem == '去除内核基带modem' }}
+        run: |
+          cd openwrt
+          make target/linux/prepare -j$(nproc) V=s || make target/linux/prepare V=s
+
+      - name: Patch kernel DTS for no-modem
+        if: ${{ github.event.inputs.modem == '去除内核基带modem' }}
+        run: |
+          cd openwrt
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          search_roots = []
+          for p in Path('build_dir').glob('target-*/linux-*/linux-*'):
+              dts = p / 'arch/arm64/boot/dts'
+              if dts.exists():
+                  search_roots.append(dts)
+          tl = Path('target/linux')
+          if tl.exists():
+              search_roots.append(tl)
+
+          print('===== DTS search roots =====')
+          for r in search_roots:
+              print(r)
+
+          remoteproc_keywords = ['qcom,msm8916-mss-pil', 'qcom,q6v5-mss', 'qcom,msm8916-mss', 'mpss-pil', 'remoteproc@4080000', '4080000.remoteproc', '4080000']
+          reserved_keywords = ['mpss@', 'mba@', 'modem@', 'rmtfs@', 'mpss_mem', 'mba_mem', 'modem_mem', 'rmtfs_mem']
+          reference_names = ['mpss', 'modem', 'mss', 'q6v5_mss', 'remoteproc_mpss', 'mba_mem', 'mpss_mem', 'modem_mem', 'rmtfs_mem']
+
+          def find_matching_brace(text, start):
+              depth = 0
+              i = start
+              in_str = esc = in_line_comment = in_block_comment = False
+              while i < len(text):
+                  ch = text[i]
+                  nxt = text[i + 1] if i + 1 < len(text) else ''
+                  if in_line_comment:
+                      if ch == '\n': in_line_comment = False
+                      i += 1; continue
+                  if in_block_comment:
+                      if ch == '*' and nxt == '/':
+                          in_block_comment = False; i += 2; continue
+                      i += 1; continue
+                  if in_str:
+                      if esc: esc = False
+                      elif ch == '\\': esc = True
+                      elif ch == '"': in_str = False
+                      i += 1; continue
+                  if ch == '/' and nxt == '/':
+                      in_line_comment = True; i += 2; continue
+                  if ch == '/' and nxt == '*':
+                      in_block_comment = True; i += 2; continue
+                  if ch == '"':
+                      in_str = True; i += 1; continue
+                  if ch == '{': depth += 1
+                  elif ch == '}':
+                      depth -= 1
+                      if depth == 0: return i
+                  i += 1
+              return -1
+
+          def block_header(text, start):
+              prev = max(text.rfind('\n', 0, start), text.rfind(';', 0, start), text.rfind('};', 0, start))
+              return text[prev + 1:start].strip()
+
+          def find_node_start_from_keyword(text, idx):
+              candidates = []
+              nb = text.find('{', idx)
+              pb = text.rfind('{', 0, idx + 1)
+              if nb != -1 and nb - idx < 420: candidates.append(nb)
+              if pb != -1: candidates.append(pb)
+              for start in candidates:
+                  end = find_matching_brace(text, start)
+                  if end == -1: continue
+                  header = block_header(text, start)
+                  sample = (header + '\n' + text[start:end + 1]).lower()
+                  if any(x in sample for x in ['remoteproc@4080000','4080000','qcom,msm8916-mss-pil','qcom,q6v5-mss','mpss','mss-pil','modem','rmtfs','mba']):
+                      return start
+              return -1
+
+          def disable_block(text, start, end):
+              block = text[start + 1:end]
+              if re.search(r'status\s*=', block):
+                  block2 = re.sub(r'status\s*=\s*"[^"]*"\s*;', 'status = "disabled";', block, count=1)
+              else:
+                  block2 = '\n\t\tstatus = "disabled";' + block
+              return text[:start + 1] + block2 + text[end:]
+
+          def collect_keyword_blocks(text, keywords):
+              blocks = set()
+              for kw in keywords:
+                  pos = 0
+                  while True:
+                      idx = text.find(kw, pos)
+                      if idx < 0: break
+                      start = find_node_start_from_keyword(text, idx)
+                      if start != -1:
+                          end = find_matching_brace(text, start)
+                          if end != -1:
+                              header = block_header(text, start)
+                              sample = (header + '\n' + text[start:end + 1]).lower()
+                              bad_wifi = ('a204000' in sample) or ('wcnss' in sample) or ('pronto' in sample)
+                              good_modem = any(x in sample for x in ['4080000','qcom,msm8916-mss-pil','qcom,q6v5-mss','mpss','mss-pil','modem','rmtfs','mba'])
+                              if good_modem and not bad_wifi:
+                                  blocks.add((start, end, kw, header))
+                      pos = idx + len(kw)
+              return blocks
+
+          def collect_reference_blocks(text):
+              blocks = set()
+              names = '|'.join(re.escape(n) for n in reference_names)
+              pattern = re.compile(r'&(' + names + r')\s*\{', re.M)
+              for m in pattern.finditer(text):
+                  start = text.find('{', m.start())
+                  if start == -1: continue
+                  end = find_matching_brace(text, start)
+                  if end == -1: continue
+                  header = block_header(text, start)
+                  sample = (header + '\n' + text[start:end + 1]).lower()
+                  if 'wcnss' in sample or 'a204000' in sample or 'pronto' in sample:
+                      continue
+                  blocks.add((start, end, '&' + m.group(1), header))
+              return blocks
+
+          changed_files = []
+          disabled_records = []
+
+          for root in search_roots:
+              for p in root.rglob('*'):
+                  if p.suffix not in ('.dts', '.dtsi'):
+                      continue
+                  try:
+                      t = p.read_text(encoding='utf-8')
+                  except UnicodeDecodeError:
+                      continue
+                  low = t.lower()
+                  if not (any(k.lower() in low for k in remoteproc_keywords + reserved_keywords) or any(('&' + n).lower() in low for n in reference_names)):
+                      continue
+                  original = t
+                  blocks = set()
+                  blocks.update(collect_keyword_blocks(t, remoteproc_keywords))
+                  blocks.update(collect_keyword_blocks(t, reserved_keywords))
+                  blocks.update(collect_reference_blocks(t))
+                  for start, end, kw, header in sorted(blocks, key=lambda x: x[0], reverse=True):
+                      t = disable_block(t, start, end)
+                      rec = f'{p}: keyword={kw}, header={header[:200]}'
+                      disabled_records.append(rec)
+                      print('disabled node:', rec)
+                  if t != original:
+                      p.write_text(t, encoding='utf-8')
+                      changed_files.append(str(p))
+
+          print('===== DTS no_modem_kernel disabled records =====')
+          for r in disabled_records:
+              print(r)
+          if not disabled_records:
+              print('No DTS/DTSI nodes were patched. Fail build to avoid half-disabled modem.')
+              raise SystemExit(1)
+
+          modem_patch_ok = any(('4080000' in r or 'msm8916-mss-pil' in r or 'mpss' in r or '&mpss' in r) for r in disabled_records)
+          if not modem_patch_ok:
+              print('No 4080000/mpss/mss-pil patch record found; fail build.')
+              raise SystemExit(1)
+          PY
+
+      - name: Download package
+        id: package
+        run: |
+          cd openwrt
+          make download -j4 V=s
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Upload latest build config
+        uses: actions/upload-artifact@main
+        with:
+          name: build-config
+          path: |
+            ${{ github.workspace }}/openwrt/.config
+            ${{ github.workspace }}/openwrt/feeds.conf.default
+          include-hidden-files: true
+
+      - name: Compile the firmware
+        id: compile
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 V=s
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME || true
+          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+
+      - name: Get kernel version
+        run: |
+          KERNEL_VER=$(cat /mnt/openwrt/build_dir/target-*/linux-*/linux-*/.kernelversion 2>/dev/null | head -1 || echo "未知")
+          echo "KERNEL_VER=$KERNEL_VER" >> "$GITHUB_ENV"
+
+      - name: Check space usage
+        if: always()
+        run: df -hT
+
+      - name: Upload bin directory
+        uses: actions/upload-artifact@main
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.MODEM_ID }}${{ env.FILE_DATE }}
+          path: openwrt/bin
+
+      - name: Organize files
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          PROFILE="${{ github.event.inputs.profile || 'ufi003' }}"
+          MODEM_CHOICE="${{ github.event.inputs.modem || '保留modem' }}"
+          MODEM_ID="${MODEM_ID:-_with_modem}"
+
+          mkdir -p flash_package
+          BOOT_IMG=$(ls *boot.img.gz *boot.img 2>/dev/null | head -1 || true)
+          SYSTEM_IMG=$(ls *system.img.gz *system.img 2>/dev/null | head -1 || true)
+          if [ -z "$BOOT_IMG" ] || [ -z "$SYSTEM_IMG" ]; then
+            echo "::error::固件文件未找到，编译可能失败！当前目录文件："
+            ls -la
+            exit 1
+          fi
+
+          cp "$BOOT_IMG" flash_package/boot.img${BOOT_IMG##*boot.img}
+          cp "$SYSTEM_IMG" flash_package/system.img${SYSTEM_IMG##*system.img}
+          if [ -f flash_package/boot.img.gz ]; then gzip -df flash_package/boot.img.gz; fi
+          if [ -f flash_package/system.img.gz ]; then gzip -df flash_package/system.img.gz; fi
+
+          echo "===== 下载 Windows platform-tools，内置 adb.exe/fastboot.exe ====="
+          curl -L --retry 3 -o /tmp/platform-tools-windows.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+          rm -rf /tmp/platform-tools
+          unzip -q /tmp/platform-tools-windows.zip -d /tmp/platform-tools
+          cp /tmp/platform-tools/platform-tools/adb.exe flash_package/ || true
+          cp /tmp/platform-tools/platform-tools/fastboot.exe flash_package/ || true
+          cp /tmp/platform-tools/platform-tools/AdbWinApi.dll flash_package/ || true
+          cp /tmp/platform-tools/platform-tools/AdbWinUsbApi.dll flash_package/ || true
+
+          echo "===== 生成 Windows 一键刷入 BAT：增强进度版 ====="
+          cat > flash_package/一键刷入_ADB或Fastboot.bat <<'EOF'
+          @echo off
+          chcp 65001 >nul
+          setlocal EnableExtensions EnableDelayedExpansion
+          title 高通410 OpenWrt 一键刷入 - 增强进度版
+
+          echo.
+          echo ============================================================
+          echo  高通410 OpenWrt 一键刷入脚本 - 增强进度版
+          echo  先检测 ADB，检测到则重启 Fastboot；否则直接检测 Fastboot。
+          echo  system/rootfs 使用 fastboot -v -S 64M 尽量显示分段进度。
+          echo ============================================================
+          echo.
+
+          cd /d "%~dp0"
+          set "BOOT_IMG=boot.img"
+          set "SYSTEM_IMG=system.img"
+          set "ROOTFS_PART=rootfs"
+          set "FASTBOOT_CHUNK=64M"
+
+          call :progress 0 "初始化"
+
+          if not exist "%BOOT_IMG%" (
+              echo [错误] 当前目录没有找到 %BOOT_IMG%
+              pause
+              exit /b 1
+          )
+          if not exist "%SYSTEM_IMG%" (
+              echo [错误] 当前目录没有找到 %SYSTEM_IMG%
+              pause
+              exit /b 1
+          )
+
+          echo.
+          echo ===== 固件文件信息 =====
+          call :file_size "%BOOT_IMG%"
+          call :file_size "%SYSTEM_IMG%"
+
+          set "ADB=adb"
+          set "FASTBOOT=fastboot"
+          if exist "%~dp0adb.exe" set "ADB=%~dp0adb.exe"
+          if exist "%~dp0fastboot.exe" set "FASTBOOT=%~dp0fastboot.exe"
+
+          if defined ADB (
+              where "%ADB%" >nul 2>nul
+              if errorlevel 1 (
+                  if not exist "%ADB%" set "ADB="
+              )
+          )
+          where "%FASTBOOT%" >nul 2>nul
+          if errorlevel 1 (
+              if not exist "%FASTBOOT%" (
+                  echo [错误] 没找到 fastboot.exe
+                  pause
+                  exit /b 1
+              )
+          )
+
+          call :progress 5 "检测 ADB 设备"
+          echo.
+          echo ===== 1. 检测 ADB 设备 =====
+          set "ADB_FOUND=0"
+          if defined ADB (
+              for /f "skip=1 tokens=1,2" %%a in ('"%ADB%" devices 2^>nul') do (
+                  if "%%b"=="device" (
+                      set "ADB_FOUND=1"
+                      set "ADB_SERIAL=%%a"
+                  )
+              )
+          )
+
+          if "%ADB_FOUND%"=="1" (
+              echo [OK] 检测到 ADB 设备：%ADB_SERIAL%
+              call :progress 15 "ADB 重启到 Fastboot"
+              "%ADB%" reboot bootloader
+              echo [等待] 等待设备进入 Fastboot...
+              call :wait_fastboot 60
+              if errorlevel 1 (
+                  echo [错误] 60 秒内没有检测到 Fastboot 设备。
+                  pause
+                  exit /b 1
+              )
+              goto flash
+          )
+
+          echo [提示] 没检测到 ADB 设备，开始检测 Fastboot 模式。
+          call :progress 20 "检测 Fastboot 设备"
+          call :wait_fastboot 5
+          if errorlevel 1 (
+              echo [错误] 没有检测到 ADB 设备，也没有检测到 Fastboot 设备。
+              pause
+              exit /b 1
+          )
+          goto flash
+
+          :wait_fastboot
+          set "WAIT_SECONDS=%~1"
+          set /a COUNT=0
+          :wait_loop
+          for /f "tokens=1" %%f in ('"%FASTBOOT%" devices 2^>nul') do (
+              if not "%%f"=="" (
+                  set "FASTBOOT_SERIAL=%%f"
+                  echo [OK] 检测到 Fastboot 设备：%%f
+                  exit /b 0
+              )
+          )
+          set /a COUNT+=1
+          <nul set /p="."
+          if %COUNT% GEQ %WAIT_SECONDS% (
+              echo.
+              exit /b 1
+          )
+          ping -n 2 127.0.0.1 >nul
+          goto wait_loop
+
+          :flash
+          echo.
+          echo ============================================================
+          echo  即将刷入 boot.img 和 system.img
+          echo ============================================================
+          choice /c YN /m "确认刷入？输入 Y 继续，N 取消"
+          if errorlevel 2 exit /b 1
+
+          call :progress 30 "开始刷入 boot 分区"
+          echo [命令] fastboot -v flash boot "%BOOT_IMG%"
+          "%FASTBOOT%" -v flash boot "%BOOT_IMG%"
+          if errorlevel 1 (
+              echo [错误] boot 刷入失败。
+              pause
+              exit /b 1
+          )
+
+          call :progress 45 "boot 完成，检测 rootfs/system 分区"
+          "%FASTBOOT%" getvar partition-size:rootfs 1>nul 2>nul
+          if errorlevel 1 (
+              set "ROOTFS_PART=system"
+          ) else (
+              set "ROOTFS_PART=rootfs"
+          )
+
+          call :progress 55 "开始刷入 %ROOTFS_PART% 分区"
+          echo [命令] fastboot -v -S %FASTBOOT_CHUNK% flash %ROOTFS_PART% "%SYSTEM_IMG%"
+          "%FASTBOOT%" -v -S %FASTBOOT_CHUNK% flash %ROOTFS_PART% "%SYSTEM_IMG%"
+          if errorlevel 1 (
+              echo [提示] 分段/详细模式失败，尝试普通模式。
+              "%FASTBOOT%" -v flash %ROOTFS_PART% "%SYSTEM_IMG%"
+              if errorlevel 1 (
+                  echo [错误] %ROOTFS_PART% 刷入失败。
+                  pause
+                  exit /b 1
+              )
+          )
+
+          call :progress 90 "刷入完成，准备重启"
+          "%FASTBOOT%" reboot
+          call :progress 100 "完成"
+          echo [完成] 第一次启动可能需要 1-3 分钟。
+          pause
+          exit /b 0
+
+          :progress
+          echo.
+          echo [进度 %~1%%] %~2
+          exit /b 0
+
+          :file_size
+          set "F=%~1"
+          for %%I in ("%F%") do set "BYTES=%%~zI"
+          powershell -NoProfile -Command "$b=%BYTES%; $mb=[math]::Round($b/1MB,2); Write-Host ('[文件] %F%  大小: ' + $mb + ' MB  (' + $b + ' bytes)')" 2>nul
+          if errorlevel 1 echo [文件] %F%  大小: %BYTES% bytes
+          exit /b 0
+          EOF
+          sed -i 's/^          //' flash_package/一键刷入_ADB或Fastboot.bat
+          unix2dos flash_package/*.bat 2>/dev/null || true
+
+          ZIP_NAME="OpenWrt_${PROFILE}${MODEM_ID}${{ env.FILE_DATE }}_刷机包.zip"
+          cd flash_package && zip -r "../$ZIP_NAME" . && cd ..
+
+          mkdir -p release_files
+          mv "$ZIP_NAME" release_files/
+          cp *.manifest release_files/ 2>/dev/null || true
+          cp *.buildinfo release_files/ 2>/dev/null || true
+          cp sha256sums release_files/ 2>/dev/null || true
+
+          echo "FLASH_PACKAGE=$PWD/flash_package" >> "$GITHUB_ENV"
+          echo "FIRMWARE=$PWD/release_files" >> "$GITHUB_ENV"
+          echo "FIRMWARE_ZIP=$PWD/release_files/$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware artifact without nested zip
+        uses: actions/upload-artifact@main
+        if: steps.organize.outputs.status == 'success' && !cancelled()
+        with:
+          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.MODEM_ID }}${{ env.FILE_DATE }}
+          path: ${{ env.FLASH_PACKAGE }}/*
+
+      - name: Generate release tag
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+        run: |
+          PROFILE="${{ github.event.inputs.profile || 'ufi003' }}"
+          MODEM_CHOICE="${{ github.event.inputs.modem || '保留modem' }}"
+          echo "release_tag=$(date +"%Y.%m.%d-%H%M")-${PROFILE}${MODEM_ID}" >> "$GITHUB_OUTPUT"
+          touch release.txt
+          {
+            echo "## Immortalwrt master分支 高通410系列 · ${PROFILE}"
+            echo ""
+            echo "| 项目 | 信息 |"
+            echo "|------|------|"
+            echo "| 编译者 | ${{ github.actor }} |"
+            echo "| 机型 | ${PROFILE} |"
+            echo "| Modem 选项 | ${MODEM_CHOICE} |"
+            echo "| 内核版本 | ${{ env.KERNEL_VER }} |"
+            echo "| 管理地址 | 192.168.1.1 |"
+            echo "| USB共享 | 已强制启用 usb0 -> br-lan，LAN DHCP 开启 |"
+            echo "| 默认用户 | root |"
+            echo "| 默认密码 | 空 |"
+            echo ""
+            echo "### 说明"
+            echo "- Actions Artifact 直接上传刷机包内容，下载后只需要解压一次。"
+            echo "- Release 页面保留单独 zip 刷机包。"
+            echo "- BAT 内置 ADB/Fastboot，并带阶段进度显示。"
+            echo "- 去除内核基带modem 会尝试释放 MPSS/MBA/RMTFS 预留内存并禁用 4080000.remoteproc。"
+            echo ""
+            EXTRA=$(echo '${{ github.event.inputs.extra_packages }}' | sed 's/,/ /g' | tr ' ' '\n' | sed '/^$/d')
+            echo "### 额外添加的包"
+            if [ -n "$EXTRA" ]; then echo "$EXTRA" | sed 's/^/- /'; else echo "无"; fi
+          } >> release.txt
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Generate file list
+        if: env.UPLOAD_RELEASE == 'true' && steps.organize.outputs.status == 'success'
+        run: |
+          find "${{ env.FIRMWARE }}" -type f > file_list.txt
+          cat file_list.txt
+          test -s file_list.txt || { echo "::error::No firmware files found"; exit 1; }
+
+      - name: Upload firmware to release
+        if: env.UPLOAD_RELEASE == 'true' && steps.organize.outputs.status == 'success'
+        uses: ncipollo/release-action@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag: ${{ steps.tag.outputs.release_tag }}
+          bodyFile: release.txt
+          artifacts: ${{ env.FIRMWARE }}/**/*
+          artifactErrorsFailBuild: false
+          allowUpdates: true
+          draft: false
+          prerelease: false
+
+      - name: Delete old workflow runs
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RETAIN_DAYS: 7
+          KEEP_MINIMUM_RUNS: 5
+        run: |
+          RUNS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100")
+          CUTOFF=$(date -d "-${RETAIN_DAYS} days" +%s)
+          DEL_IDS=$(echo "$RUNS" | jq -r --arg cutoff "$CUTOFF" --argjson keep "$KEEP_MINIMUM_RUNS" '
+            [.workflow_runs[] | select((now - (.created_at | fromdateiso8601)) > ($cutoff | tonumber)) | {id, created_at}]
+            | sort_by(.created_at)
+            | .[:-$keep]
+            | .[].id
+          ')
+          if [ -z "$DEL_IDS" ]; then
+            echo "No old runs to delete."
+          else
+            echo "$DEL_IDS" | while read -r run_id; do
+              [ -n "$run_id" ] || continue
+              echo "Deleting run $run_id"
+              curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id"
+            done
+          fi
